@@ -38,15 +38,41 @@ flowchart TD
 ## 三、意图识别的数据流（v0.1 核心）
 
 ```
-用户文本
-  ↓ IntentRouter.classify()
-  ↓ LLMClient.chat(messages, json_mode=True)   ← temperature=0，决策要稳定
-  ↓ 模型输出 JSON（可能带 ``` 围栏 / 前后废话）
-  ↓ parse_json_safely()                        ← 解析失败 → IntentResult.fallback()
-  ↓ IntentResult.from_dict(data, threshold)    ← 枚举校验 / confidence 钳位 / 实体抽取
-  ↓
-IntentResult { intent, confidence, emotion, need_human, order_id,
-               low_confidence, degraded, should_handoff }
+
+你敲命令: python -m cs_agent --text "..."
+    │
+    ▼
+[__main__.py 第4行]
+    │  from .cli import main;  main()
+    ▼
+[cli.py main() 第37-41行]
+    │  ① Config.load() 读 .env
+    │  ② 造 LLMClient（注入 config）
+    │  ③ 造 IntentRouter（注入 llm）  ← 依赖注入
+    │  ④ router.classify(text)
+    ▼
+[intent.py IntentRouter.classify() 第106-116行]
+    │  打包 messages(system prompt + 用户话)
+    │       │
+    │       ▼
+    │  [llm.py LLMClient.chat() 第51-95行]
+    │      ① Config.require() 自检
+    │      ② 拼 URL/headers/payload
+    │      ③ requests.post 发 HTTP
+    │      ④ 401/404/429 人话翻译
+    │      ⑤ 返回 message dict
+    │       │
+    ▼       │
+[intent.py 继续]
+    │  parse_json_safely(content) 解析JSON
+    │     ├─ 失败 → IntentResult.fallback() → degraded=True → 转人工
+    │     └─ 成功 → IntentResult.from_dict(data, threshold)
+    │                    逐字段防御校验（枚举/钳位/类型强转）
+    ▼
+[cli.py _print_result() 第16-26行]
+    │  打印 JSON + should_handoff 路由信号
+    ▼
+  终端输出 ✅
 ```
 
 ## 四、关键设计决策（面试弹药）
