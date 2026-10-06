@@ -1,7 +1,8 @@
-"""cs-agent v0.1 骨架自检（不消耗 API 额度）
+"""cs-agent 骨架自检（不消耗 API 额度）
 
 运行：python tests/test_skeleton.py
-覆盖：JSON 解析兜底 / 意图结果构造 / 路由信号逻辑 / 配置自检 / Prompt 完整性。
+v0.1 覆盖：解析兜底 / 意图构造 / 路由信号 / 配置守卫 / Prompt 完整性
+v0.5 新增：工具注册表 / 工具执行异常安全 / RAG 切分与检索 / paid_total 语义
 """
 
 import sys
@@ -14,6 +15,8 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 from cs_agent.config import Config
 from cs_agent.intent import INTENTS, INTENT_SYSTEM_PROMPT, IntentResult
 from cs_agent.llm import parse_json_safely
+from cs_agent.rag import KnowledgeBase, Chunk, _tokenize
+from cs_agent.tools import execute_tool, get_tools_schema, tool_names
 
 
 class TestParseJsonSafely(unittest.TestCase):
@@ -97,6 +100,77 @@ class TestConfigGuard(unittest.TestCase):
     def test_require_passes_on_valid(self):
         cfg = Config(base_url="https://x", api_key="sk-real", model="m")
         cfg.require()  # 不应抛异常
+
+
+class TestToolRegistry(unittest.TestCase):
+    """v0.5 工具注册表——不变量断言，不硬编码数量（Day 2 教训）。"""
+
+    def test_expected_tools_registered(self):
+        for expected in ["get_order_status", "get_order_price", "check_stock", "create_ticket"]:
+            self.assertIn(expected, tool_names())
+
+    def test_schema_impl_consistent(self):
+        """schema 里的每个工具都必须有 name/description/parameters（一致性不变量）。"""
+        for schema in get_tools_schema():
+            fn = schema["function"]
+            self.assertTrue(fn["name"])
+            self.assertTrue(fn["description"].strip(), f"{fn['name']} 缺 description")
+            self.assertIn("parameters", fn)
+
+    def test_unknown_tool_returns_error_not_raise(self):
+        """护栏③：未知工具不抛异常，返回可读 error。"""
+        import json
+        out = json.loads(execute_tool("no_such_tool", {}))
+        self.assertIn("error", out)
+
+    def test_bad_args_return_readable_error(self):
+        """护栏③：参数错误不能抛异常，要变成可读 Observation。"""
+        import json
+        out = json.loads(execute_tool("get_order_status", {"wrong_param": 1}))
+        self.assertIn("error", out)
+
+    def test_order_price_is_authoritative(self):
+        """paid_total 语义：退款依据，不是单价×数量（A1002 = 307.2 不是 384）。"""
+        import json
+        out = json.loads(execute_tool("get_order_price", {"order_id": "A1002"}))
+        self.assertEqual(out["paid_total"], 307.2)
+        self.assertNotEqual(out["paid_total"], out["unit_price"] * out["quantity"])
+
+    def test_missing_order_returns_found_false(self):
+        import json
+        out = json.loads(execute_tool("get_order_status", {"order_id": "ZZZZ999"}))
+        self.assertFalse(out["found"])
+
+
+class TestTokenize(unittest.TestCase):
+    def test_chinese_bigram(self):
+        toks = _tokenize("退款政策")
+        self.assertIn("退款", toks)
+        self.assertIn("政策", toks)
+
+    def test_alnum(self):
+        toks = _tokenize("SKU-1001 价格")
+        self.assertIn("sku-1001", toks)
+
+
+class TestKnowledgeBase(unittest.TestCase):
+    def test_retrieve_finds_refund_policy(self):
+        kb = KnowledgeBase([
+            Chunk("p.md", "退款政策", "支持 7 天无理由退货，按实付金额退回"),
+            Chunk("p.md", "配送时效", "现货 48 小时内发货"),
+        ])
+        hits = kb.retrieve("我要退款，怎么退", top_k=1)
+        self.assertTrue(hits)
+        self.assertEqual(hits[0].title, "退款政策")
+
+    def test_empty_kb_returns_empty(self):
+        kb = KnowledgeBase([])
+        self.assertEqual(kb.retrieve("任意问题"), [])
+        self.assertEqual(kb.as_context("任意问题"), "")
+
+    def test_cite_format(self):
+        c = Chunk("policies.md", "退款政策", "正文")
+        self.assertEqual(c.cite(), "[policies.md · 退款政策]")
 
 
 if __name__ == "__main__":

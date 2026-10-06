@@ -16,12 +16,22 @@ from dotenv import load_dotenv
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 
+def _resolve_knowledge_dir() -> Path:
+    """知识库目录：.env 的 KNOWLEDGE_DIR 优先（相对仓库根解析），否则默认 knowledge/。"""
+    raw = os.getenv("KNOWLEDGE_DIR", "").strip()
+    if not raw:
+        return PROJECT_ROOT / "knowledge"
+    p = Path(raw)
+    return p if p.is_absolute() else PROJECT_ROOT / p
+
+
 @dataclass(frozen=True)
 class Config:
     base_url: str
     api_key: str
     model: str
     intent_confidence_threshold: float = 0.6
+    knowledge_dir: Path = PROJECT_ROOT / "knowledge"
 
     @classmethod
     def load(cls) -> "Config":
@@ -34,6 +44,7 @@ class Config:
             intent_confidence_threshold=float(
                 os.getenv("INTENT_CONFIDENCE_THRESHOLD", "0.6")
             ),
+            knowledge_dir=_resolve_knowledge_dir(),
         )
 
     def require(self) -> None:
