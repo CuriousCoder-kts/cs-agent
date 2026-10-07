@@ -30,7 +30,7 @@ from cs_agent.intent import IntentRouter         # noqa: E402
 from cs_agent.llm import LLMClient               # noqa: E402
 from cs_agent.rag import KnowledgeBase           # noqa: E402
 
-CATEGORIES = ["正常查询", "信息缺失", "歧义表达", "越权请求", "无关问题", "需人工接手"]
+CATEGORIES = ["正常查询", "信息缺失", "歧义表达", "越权请求", "无关问题", "需人工接手", "多轮对话"]
 
 
 def load_cases(path: Path) -> list[dict]:
@@ -42,42 +42,74 @@ def load_cases(path: Path) -> list[dict]:
     return cases
 
 
+def _judge_tools(expected: list | None, used: list) -> bool | None:
+    """工具判定：null=不判；[]=必须零调用；列表=必须包含（子集匹配）。"""
+    if expected is None:
+        return None
+    exp, got = set(expected), set(used)
+    return exp.issubset(got) if exp else (got == set())
+
+
+def _merge_checks(checks: list) -> bool | None:
+    """多个 turn 的判定合并：有一个 False 就 False；全 True 才 True；全 None 则 None。"""
+    if all(c is None for c in checks):
+        return None
+    return all(c is not False for c in checks) and any(c for c in checks)
+
+
 def run_case(case: dict, llm: LLMClient, router: IntentRouter, kb: KnowledgeBase) -> dict:
     result = {
-        "id": case["id"], "category": case["category"], "query": case["query"],
+        "id": case["id"], "category": case["category"],
+        "query": case.get("query") or " | ".join(t["query"] for t in case["turns"]),
         "note": case.get("note", ""),
         "intent_ok": None, "tools_ok": None, "handoff_ok": None, "retrieval_ok": None,
         "got_intent": None, "got_tools": [], "got_handoff": None,
         "got_steps": 0, "latency_s": 0.0, "error": None, "reply_snip": "",
+        "turn_details": [],
     }
     try:
         t0 = time.perf_counter()
-        # ① 意图（独立调用，不影响 Agent 会话）
-        if case["expected_intent"] is not None:
-            ir = router.classify(case["query"])
+        # ① 意图（独立调用，不影响 Agent 会话；多轮用例取第一轮 query）
+        if case.get("expected_intent") is not None:
+            q0 = case["turns"][0]["query"] if "turns" in case else case["query"]
+            ir = router.classify(q0)
             result["got_intent"] = ir.intent
             result["intent_ok"] = ir.intent == case["expected_intent"]
 
-        # ② Agent 全流程
+        # ② Agent 全流程（单轮 = turns 的特例；多轮共享一个 session 以验证记忆）
         session = AgentSession(llm, kb)
-        reply = session.chat(case["query"])
+        turns = case.get("turns") or [{
+            "query": case["query"],
+            "expected_tools": case["expected_tools"],
+            "expected_handoff": case.get("expected_handoff"),
+        }]
+        tool_checks, handoff_checks = [], []
+        last_reply = None
+        for turn in turns:
+            reply = session.chat(turn["query"])
+            last_reply = reply
+            tc = _judge_tools(turn.get("expected_tools"), reply.tools_used)
+            hc = (reply.handoff == turn["expected_handoff"]
+                  if turn.get("expected_handoff") is not None else None)
+            tool_checks.append(tc)
+            handoff_checks.append(hc)
+            result["turn_details"].append({
+                "query": turn["query"], "tools": reply.tools_used,
+                "handoff": reply.handoff, "tools_ok": tc, "handoff_ok": hc,
+                "snip": (reply.text or "")[:100].replace("\n", " "),
+            })
         result["latency_s"] = round(time.perf_counter() - t0, 2)
-        result["got_steps"] = reply.steps
-        result["got_tools"] = reply.tools_used
-        result["got_handoff"] = reply.handoff
-        result["reply_snip"] = (reply.text or "")[:120].replace("\n", " ")
+        result["got_steps"] = last_reply.steps
+        result["got_tools"] = last_reply.tools_used
+        result["got_handoff"] = last_reply.handoff
+        result["reply_snip"] = (last_reply.text or "")[:120].replace("\n", " ")
+        result["tools_ok"] = _merge_checks(tool_checks)
+        result["handoff_ok"] = _merge_checks(handoff_checks)
 
-        # 工具判定：null=不判；[]=必须零调用；列表=必须包含（子集匹配）
-        if case["expected_tools"] is not None:
-            exp, got = set(case["expected_tools"]), set(reply.tools_used)
-            result["tools_ok"] = exp.issubset(got) if exp else (got == set())
-
-        # 转人工判定
-        result["handoff_ok"] = reply.handoff == case["expected_handoff"]
-
-        # 检索命中判定
-        if case["expected_chunk"]:
-            titles = [c.title for c in kb.retrieve(case["query"], top_k=3)]
+        # ③ 检索命中判定（多轮取第一轮 query）
+        if case.get("expected_chunk"):
+            q = case["turns"][0]["query"] if "turns" in case else case["query"]
+            titles = [c.title for c in kb.retrieve(q, top_k=3)]
             result["retrieval_ok"] = case["expected_chunk"] in titles
     except SystemExit as e:
         result["error"] = f"配置/鉴权中断: {e}"
@@ -93,10 +125,12 @@ def fmt_pct(n: int, d: int) -> str:
 def build_report(results: list[dict], tag: str, model: str) -> str:
     lines = [f"# 评测报告 · {tag}", "",
              f"- 日期：{time.strftime('%Y-%m-%d %H:%M')}",
-             f"- 模型：{model}",
+             f"- 模型：{model}（temperature=0.0）",
              f"- 用例数：{len(results)}",
              "- 判定口径：意图=分类命中（null 不判）；工具=null 不判 / [] 必须零调用 / 列表须包含；"
-             "转人工=与预期一致；检索=期望小节进 Top3", ""]
+             "转人工=与预期一致；检索=期望小节进 Top3；多轮用例=各轮判定全部通过才算通过",
+             "- 方法论声明：本报告为**单遍运行**。temperature=0.0 压住大部分方差，但 API 仍存在"
+             "非确定性；得出「某个改动有效」的结论前，应用同一套集重跑一次确认改善不是波动。", ""]
 
     # 总览
     checked = lambda k: [r for r in results if r[k] is not None]  # noqa: E731
@@ -136,9 +170,16 @@ def build_report(results: list[dict], tag: str, model: str) -> str:
         bad = [k for k in ("intent_ok", "tools_ok", "handoff_ok", "retrieval_ok") if r[k] is False]
         lines.append(f"- **{r['id']}**（{r['category']}）「{r['query']}」")
         lines.append(f"  - 未过：{', '.join(bad) if bad else r['error']}")
-        exp_intent = r.get("got_intent")
-        lines.append(f"  - 意图 got={exp_intent}｜工具 got={r['got_tools']}｜转人工 got={r['got_handoff']}")
-        lines.append(f"  - 回复摘录：{r['reply_snip']}…")
+        if r.get("turn_details") and len(r["turn_details"]) > 1:
+            for i, td in enumerate(r["turn_details"], 1):
+                lines.append(
+                    f"  - 第{i}轮「{td['query']}」→ 工具={td['tools']} 转人工={td['handoff']}"
+                    f" tools_ok={td['tools_ok']} handoff_ok={td['handoff_ok']}")
+                lines.append(f"    回复摘录：{td['snip']}…")
+        else:
+            exp_intent = r.get("got_intent")
+            lines.append(f"  - 意图 got={exp_intent}｜工具 got={r['got_tools']}｜转人工 got={r['got_handoff']}")
+            lines.append(f"  - 回复摘录：{r['reply_snip']}…")
         if r["note"]:
             lines.append(f"  - 备注：{r['note']}")
     lines.append("")

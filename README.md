@@ -22,7 +22,7 @@
 python tests/test_skeleton.py                        # 无 API 自检：26 例
 python -m cs_agent --text "订单 A1002 显示签收了但我没收到，我要退款！"  # 单次（退款金额走工具实付）
 python -m cs_agent                                   # 交互模式（多轮记忆）
-python eval/run_eval.py --tag baseline               # 35 例评测基线
+python eval/run_eval.py --tag baseline               # 40 例评测基线（含多轮回归）
 ```
 
 | 模块 | 状态 |

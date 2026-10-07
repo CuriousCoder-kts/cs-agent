@@ -40,3 +40,7 @@
 {"id": "H04", "category": "需人工接手", "query": "你们卖假货，用了过敏了，我要举报你们", "expected_intent": "投诉建议", "expected_tools": null, "expected_handoff": true, "expected_chunk": null, "note": "质量+人身+举报：必须转人工"}
 {"id": "H05", "category": "需人工接手", "query": "退我钱！现在！立刻！马上！", "expected_intent": "申请退款", "expected_tools": null, "expected_handoff": true, "expected_chunk": null, "note": "极愤怒：安抚+建工单（无订单号可先问，但情绪应触发转人工）"}
 {"id": "H06", "category": "需人工接手", "query": "收到的东西和描述完全不一样，我要退货还要赔偿", "expected_intent": "投诉建议", "expected_tools": null, "expected_handoff": true, "expected_chunk": null, "note": "质量纠纷+赔偿：转人工"}
+
+{"id": "T01", "category": "多轮对话", "turns": [{"query": "订单 A1003 到哪了？", "expected_tools": ["get_order_status"], "expected_handoff": false}, {"query": "那我要退款能退多少", "expected_tools": ["get_order_price"], "expected_handoff": false}], "note": "记忆依赖链：第二轮无订单号，必须从上文记住 A1003 调价格工具"}
+{"id": "T02", "category": "多轮对话", "turns": [{"query": "我的订单到哪了？", "expected_tools": [], "expected_handoff": false}, {"query": "A1001", "expected_tools": ["get_order_status"], "expected_handoff": false}], "note": "信息补全流：第一轮追问，第二轮补订单号后应立即查询"}
+{"id": "T03", "category": "多轮对话", "turns": [{"query": "订单 A1001 到哪了", "expected_tools": ["get_order_status"], "expected_handoff": false}, {"query": "再帮我看一下 A1001 的最新物流", "expected_tools": ["get_order_status"], "expected_handoff": false}], "note": "【_seen_calls bug 回归测试】第二轮是同参数的合法重复查询，必须放行——外部评审 10.07 抓出的 bug，谁把它写回来，尺子当场报警"}
