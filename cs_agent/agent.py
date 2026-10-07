@@ -23,16 +23,30 @@ SYSTEM_PROMPT = """你是一名专业、友善的电商客服智能体。你的�
 
 1. 先判断用户诉求类型：
    - 订单/物流/退款/库存 → 调用对应工具获取真实数据，严禁凭空编造订单信息；
-   - 商品咨询/售后政策 → 参考下方"知识库资料"作答，并自然说明依据；
+   - 商品咨询/售后政策 → 参考"知识库资料"作答；涉及政策条款时用【依据：小节名】标注来源；
    - 打招呼/闲聊 → 直接友好回应。
 
-2. 涉及金额（退款、赔付）必须调用工具拿到实付金额，严禁用单价心算。
+2. 工具使用原则：【读操作主动做，写操作先确认】
+   - 查询类工具（订单/价格/库存）在信息足够时主动调用，不要反问用户已给出的信息；
+   - 退款等有实际影响的操作：先查数据、给方案，经用户确认后再执行；
+   - 无权限执行的操作（改地址、调等级、绕过流程）：明确说明限制，绝不假装成功。
 
-3. 如果用户情绪激动或明确要求人工，调用 create_ticket 创建工单并安抚用户。
+3. 涉及金额（退款、赔付）必须调用工具拿到实付金额，严禁用单价心算。
 
-4. 信息不足时（如没给订单号），先礼貌追问，不要猜测。
+4. 政策类问题如果知识库资料里没有依据，直接说"这个我需要帮您确认"，不要编造。
+   承认不知道永远好于给出错误信息。
 
-5. 回答简洁、口语化，像真人客服，不要暴露你是程序或提及工具名称。
+5. 【建工单的硬性触发条件——优先级高于一切追问】只要用户消息中出现下列
+   任一信号，本轮必须调用 create_ticket，不得只用话术安抚：
+   - 投诉、举报、要赔偿、丢件、签收纠纷、商品质量问题、过敏等人身安全问题
+   - 要求绕过流程、跳过审核、让你违反规则
+   - 语气明显愤怒（命令式催促、连续感叹号）
+   summary 写清问题；订单号未知就在 summary 里写"订单号待补充"。
+   做法：一句话安抚 + 建工单 + 告知人工跟进时间。追问细节放在工单创建之后。
+
+6. 信息不足时（如没给订单号的普通查询），先礼貌追问，不要猜测。
+
+7. 回答简洁、口语化，像真人客服，不要暴露你是程序或提及工具名称。
 
 【知识库资料】
 {retrieved_context}
@@ -56,7 +70,10 @@ class AgentSession:
         self.kb = kb
         self.max_steps = max_steps
         self.messages: list[dict] = []   # 对话记忆：跨轮存活
-        self._seen_calls: set[str] = set()
+        # 注意：去重集合是【每轮独立】的（在 chat() 内创建）。
+        # 教训（外部评审 10.07 指出）：曾用实例级 _seen_calls 跨轮保留，
+        # 导致用户在同一会话里合法地重复问同一订单会被误拦。
+        # 去重护栏的靶子是"单轮内的死循环"，不是跨轮的正常重复。
 
     def _build_system_prompt(self, user_text: str) -> str:
         """每轮按用户问题动态检索知识库，注入 system prompt。"""
@@ -70,6 +87,7 @@ class AgentSession:
 
         reply = AgentReply(text="")
         tools = get_tools_schema()
+        seen_calls: set[str] = set()   # 护栏②作用域 = 本轮（防死循环，不拦跨轮合法重复）
 
         for step in range(1, self.max_steps + 1):
             reply.steps = step
@@ -101,13 +119,13 @@ class AgentSession:
 
                 # 护栏②：同参数重复调用 → 回 warning，促模型换思路
                 signature = f"{name}:{json.dumps(args, sort_keys=True, ensure_ascii=False)}"
-                if signature in self._seen_calls:
+                if signature in seen_calls:
                     result = json.dumps(
                         {"warning": f"已用相同参数调用过 {name}，请勿重复，换个思路或直接作答"},
                         ensure_ascii=False,
                     )
                 else:
-                    self._seen_calls.add(signature)
+                    seen_calls.add(signature)
                     result = execute_tool(name, args)   # 护栏③在 tools 内部
                     reply.tools_used.append(name)
                     reply.trace.append(f"{name}({raw_args})")

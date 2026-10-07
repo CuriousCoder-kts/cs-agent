@@ -13,25 +13,33 @@
 - **人机协同为底线**：低置信度自动转人工，幻觉不上线；
 - **量化评测为准绳**：每个版本都有指标，用数据说话。
 
-## 二、当前状态（v0.1 · 2026-10-04）
+## 二、当前状态（v0.5 + 评测基线 · 2026-10-07）
 
-**意图识别路由已落地**：命令行输入一句话 → 输出结构化意图 JSON（intent / confidence / emotion / need_human / order_id）+ 路由信号（低置信度 / 解析失败 / 情绪失控 → 转人工）。
+**Agent 内核已落地并实跑验收**：意图分诊 → 工具调用（FC 循环 + 三护栏）→ RAG 知识库问答 → 多轮记忆 → 工单转人工。
 
 ```bash
 # 快速体验（先 cp .env.example .env 并填入 Key）
-python tests/test_skeleton.py                        # 无 API 自检：15 例
-python -m cs_agent --text "订单 A1003 怎么还没到，我要退款！"   # 单次模式
-python -m cs_agent                                   # 交互模式
+python tests/test_skeleton.py                        # 无 API 自检：26 例
+python -m cs_agent --text "订单 A1002 显示签收了但我没收到，我要退款！"  # 单次（退款金额走工具实付）
+python -m cs_agent                                   # 交互模式（多轮记忆）
+python eval/run_eval.py --tag baseline               # 35 例评测基线
 ```
 
 | 模块 | 状态 |
 |------|------|
-| 配置管理（.env + frozen dataclass + 自检） | ✅ |
-| LLM 客户端（OpenAI 兼容 + 错误翻译 + JSON 解析兜底） | ✅ |
-| 意图路由（枚举约束 / confidence 钳位 / 实体抽取 / 降级转人工） | ✅ |
-| CLI（单次 + 交互） | ✅ |
-| ToolAgent（FC 循环 + 工具注册表） | ⏳ v0.5 |
-| RAG 链路 + 对话记忆 + 转人工工单 | ⏳ v0.5 |
+| 配置管理（.env + frozen dataclass + 自检） | ✅ v0.1 |
+| LLM 客户端（OpenAI 兼容 + 错误翻译 + JSON 解析兜底） | ✅ v0.1 |
+| 意图路由（枚举约束 / confidence 钳位 / 实体抽取 / 降级转人工） | ✅ v0.1 |
+| 工具注册表（@tool 装饰器：实现+schema+策略描述一次登记） | ✅ v0.5 |
+| Agent 内核（FC 循环 + max_steps/去重/异常回传三护栏 + 多轮记忆） | ✅ v0.5 |
+| RAG 知识库（内存版检索 + 引用标注；v1.5 对照升级 pgvector） | ✅ v0.5 |
+| 工单转人工（create_ticket + 情绪/低置信度信号） | ✅ v0.5 |
+| **评测基线**（35 例 6 类场景：意图/工具/转人工/检索/延迟） | ✅ v0.6 |
+| 工单落盘 + 人工侧视图 + 操作确认 | ⏳ v0.7 |
+| Web 界面 + API + Docker | ⏳ v1 |
+| 检索升级对照（关键词 vs 向量 vs 混合，失败证据驱动） | ⏳ v1.5 |
+
+架构详情见 [docs/architecture.md](docs/architecture.md)；开源对标见 [docs/benchmark.md](docs/benchmark.md)；最新评测报告见 [docs/eval/](docs/eval/)。
 
 架构详情见 [docs/architecture.md](docs/architecture.md)。
 
